@@ -7,10 +7,10 @@ import JSZip from 'jszip';
 import {
   FILES_DIR, getSettings, updateSettings, getCredentials, saveCredentials, deleteCredentials, resolveModel,
   listCharacters, getCharacter, createCharacter, updateCharacter, addCharacterImage, deleteCharacter,
-  listJobs, getJob, parseDataUrl, saveImage,
+  listJobs, getJob, parseDataUrl, saveImage, readImage,
 } from './store.js';
-import { validateCredentials, testConnection, getAccessToken } from './vertex.js';
-import { ASPECT_RATIOS } from './prompts.js';
+import { validateCredentials, testConnection, getAccessToken, generateText, VertexError } from './vertex.js';
+import { ASPECT_RATIOS, buildDescribeParts } from './prompts.js';
 import {
   subscribe, queueState, setPaused, clearCooldown, createJobs, cancelJob, retryJob, regenerateJob,
   deleteJobs, deleteResult, ACTIVE,
@@ -113,6 +113,35 @@ app.post('/api/characters/:id/images', wrap((req, res) => {
   res.json({ character: c || getCharacter(req.params.id) });
 }));
 
+// AI-written appearance sheet (hair, eyes, outfit...) that is added to every prompt using this character
+const TEXT_MODEL_FALLBACKS = ['gemini-3.5-flash', 'gemini-3-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash'];
+
+app.post('/api/characters/:id/describe', wrap(async (req, res) => {
+  const c = getCharacter(req.params.id);
+  if (!c) throw httpError(404, '캐릭터가 없습니다.');
+  if (!c.images.length) throw new Error('참조 이미지가 없습니다.');
+  const creds = getCredentials();
+  if (!creds) throw new Error('서비스 계정 JSON을 먼저 등록하세요.');
+  const s = getSettings();
+  const parts = buildDescribeParts(c, { loadImage: readImage });
+  const candidates = [...new Set([s.textModel, ...TEXT_MODEL_FALLBACKS].filter(Boolean))];
+  let text;
+  let lastErr;
+  for (const model of candidates) {
+    try {
+      text = await generateText({ creds, location: s.location, model, parts });
+      break;
+    } catch (err) {
+      lastErr = err;
+      // only an unknown model ID is worth trying the next candidate for
+      if (!(err instanceof VertexError) || err.kind !== 'not_found') break;
+    }
+  }
+  if (!text) throw new Error(`외형 분석 실패: ${lastErr?.message || '알 수 없는 오류'}`);
+  const appearance = text.replace(/```[a-z]*\n?|```/g, '').trim();
+  res.json({ character: updateCharacter(c.id, { appearance }) });
+}));
+
 app.delete('/api/characters/:id', wrap((req, res) => {
   if (!deleteCharacter(req.params.id)) throw httpError(404, '캐릭터가 없습니다.');
   res.json({ ok: true });
@@ -163,7 +192,6 @@ app.post('/api/jobs/transform', wrap((req, res) => {
     ...commonOptions(base),
     style: ['character', 'anime', 'webtoon', 'manga'].includes(base.style) ? base.style : 'character',
     others: base.others === 'remove' ? 'remove' : 'keep',
-    noProps: base.noProps !== false,
     maxRefs: Math.min(6, Math.max(1, Number(base.maxRefs) || 3)),
   };
   if (!items.length) throw new Error('이미지가 없습니다.');
@@ -184,8 +212,13 @@ app.post('/api/jobs/transform', wrap((req, res) => {
     if (!subjects.length) throw new Error(`${i + 1}번째 이미지에 변환할 인물이 지정되지 않았습니다.`);
     const sourceFile = saveImage('uploads', parseDataUrl(item.image));
     const guideFile = item.guide && subjects.some((s) => s.box) ? saveImage('uploads', parseDataUrl(item.guide)) : null;
+    const extras = (Array.isArray(item.extras) ? item.extras : [])
+      .filter((e) => e && String(e.prompt || '').trim())
+      .slice(0, 40)
+      .map((e) => ({ label: String(e.label || '').slice(0, 60), prompt: String(e.prompt).slice(0, 1000) }));
     return {
       type: 'transform',
+      extras,
       title: String(item.title || '').slice(0, 200),
       sourceFile,
       guideFile,
@@ -210,15 +243,89 @@ app.post('/api/jobs/colorize', wrap((req, res) => {
     refs: (base.refs || []).filter((id) => getCharacter(id)).slice(0, 6),
   };
   if (!items.length) throw new Error('이미지가 없습니다.');
-  const specs = items.map((item) => ({
-    type: 'colorize',
-    title: String(item.title || '').slice(0, 200),
-    sourceFile: saveImage('uploads', parseDataUrl(item.image)),
-    sourceW: Number(item.width) || 0,
-    sourceH: Number(item.height) || 0,
-    options,
-    want,
-  }));
+  const specs = items.map((item) => {
+    const masked = maskedFields(item);
+    return {
+      type: 'colorize',
+      title: String(item.title || '').slice(0, 200),
+      sourceFile: saveImage('uploads', parseDataUrl(item.image)),
+      sourceW: Number(item.width) || 0,
+      sourceH: Number(item.height) || 0,
+      ...masked,
+      options: masked.pad ? { ...options, aspectRatio: masked.pad.ratio } : options,
+      want,
+    };
+  });
+  const out = createJobs(specs, batchId);
+  res.json({ batchId: out.batchId, count: out.jobs.length });
+}));
+
+const CENSOR_FILLS = ['gray', 'black', 'white', 'mosaic'];
+
+// Masked jobs: the client sends the image to submit (masked + padded to a supported ratio),
+// a restore mask and the content rectangle so the server can paste the original back.
+function maskedFields(item) {
+  const out = {};
+  if (item.send) out.sendFile = saveImage('uploads', parseDataUrl(item.send));
+  if (item.restore) out.restoreFile = saveImage('uploads', parseDataUrl(item.restore));
+  if (item.pad && ASPECT_RATIOS.includes(item.pad.ratio)) {
+    const x = clamp01(item.pad.x);
+    const y = clamp01(item.pad.y);
+    out.pad = { x, y, w: Math.min(1 - x, clamp01(item.pad.w)) || 1, h: Math.min(1 - y, clamp01(item.pad.h)) || 1, ratio: item.pad.ratio };
+  }
+  if (CENSOR_FILLS.includes(item.censorFill)) out.censorFill = item.censorFill;
+  return out;
+}
+
+app.post('/api/jobs/free', wrap((req, res) => {
+  const { items = [], want = 1, batchId } = req.body || {};
+  const base = req.body.options || {};
+  const options = commonOptions(base);
+  const prompt = String(req.body.prompt || '').trim().slice(0, 20000);
+  if (!prompt) throw new Error('프롬프트를 입력하세요.');
+  if (!items.length) throw new Error('작업이 없습니다.');
+  const specs = items.map((item) => {
+    const inputFiles = (item.images || []).slice(0, 14).map((d) => saveImage('uploads', parseDataUrl(d)));
+    return {
+      type: 'free',
+      title: String(item.title || prompt.slice(0, 40)).slice(0, 200),
+      sourceFile: inputFiles[0] || null,
+      sourceW: Number(item.width) || 0,
+      sourceH: Number(item.height) || 0,
+      inputFiles,
+      prompt,
+      options,
+      want,
+    };
+  });
+  const out = createJobs(specs, batchId);
+  res.json({ batchId: out.batchId, count: out.jobs.length });
+}));
+
+app.post('/api/jobs/inpaint', wrap((req, res) => {
+  const { items = [], want = 1, batchId } = req.body || {};
+  const base = req.body.options || {};
+  const options = { ...commonOptions(base), prompt: String(base.prompt || '').slice(0, 8000) };
+  const refFiles = (req.body.refs || []).slice(0, 10).map((d) => saveImage('uploads', parseDataUrl(d)));
+  if (!items.length) throw new Error('이미지가 없습니다.');
+  const specs = items.map((item, i) => {
+    const prompt = String(item.prompt || '').slice(0, 8000);
+    if (!options.prompt.trim() && !prompt.trim()) throw new Error(`${i + 1}번째 이미지: 프롬프트를 입력하세요.`);
+    const masked = maskedFields(item);
+    return {
+      type: 'inpaint',
+      title: String(item.title || '').slice(0, 200),
+      sourceFile: saveImage('uploads', parseDataUrl(item.image)),
+      guideFile: item.guide ? saveImage('uploads', parseDataUrl(item.guide)) : null,
+      sourceW: Number(item.width) || 0,
+      sourceH: Number(item.height) || 0,
+      ...masked,
+      refFiles,
+      prompt,
+      options: masked.pad ? { ...options, aspectRatio: masked.pad.ratio } : options,
+      want,
+    };
+  });
   const out = createJobs(specs, batchId);
   res.json({ batchId: out.batchId, count: out.jobs.length });
 }));
@@ -251,6 +358,8 @@ app.post('/api/queue', wrap((req, res) => {
   res.json({ queue: queueState() });
 }));
 
+const SUFFIX = { transform: '2d', colorize: 'color', inpaint: 'inpaint', free: 'gen' };
+
 // zip download of results: ?ids=a,b,c  or ?batch=xyz
 app.get('/api/download.zip', wrap(async (req, res) => {
   let jobs = [];
@@ -268,12 +377,12 @@ app.get('/api/download.zip', wrap(async (req, res) => {
     return candidate;
   };
   jobs.sort((a, b) => a.createdAt - b.createdAt).forEach((job, idx) => {
-    const stem = (job.title || `${String(idx + 1).padStart(3, '0')}`).replace(/\.[a-z0-9]+$/i, '').replace(/[\\/:*?"<>|]+/g, '_');
+    const stem = (job.title || `${String(idx + 1).padStart(3, '0')}`).slice(0, 80).replace(/\.[a-z0-9]+$/i, '').replace(/[\\/:*?"<>|]+/g, '_');
     job.results.forEach((r, k) => {
       const ext = path.extname(r.file);
       const abs = path.join(FILES_DIR, r.file);
       if (!fs.existsSync(abs)) return;
-      zip.file(uniqueName(`${stem}${job.results.length > 1 ? `_v${k + 1}` : ''}_${job.type === 'colorize' ? 'color' : '2d'}${ext}`), fs.readFileSync(abs));
+      zip.file(uniqueName(`${stem}${job.results.length > 1 ? `_v${k + 1}` : ''}_${SUFFIX[job.type] || 'out'}${ext}`), fs.readFileSync(abs));
       n++;
     });
     if (withSource && job.sourceFile) {

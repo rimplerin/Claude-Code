@@ -5,7 +5,15 @@ import {
   scheduleJobsSave, flushJobs, readImage, saveImage, removeFile, getCharacter, newId,
 } from './store.js';
 import { generateImage, VertexError } from './vertex.js';
-import { buildTransformParts, buildColorizeParts, resolveAspectRatio } from './prompts.js';
+import { buildTransformParts, buildColorizeParts, buildFreeParts, buildInpaintParts, resolveAspectRatio } from './prompts.js';
+import { postProcess } from './imageops.js';
+
+const BUILDERS = {
+  transform: buildTransformParts,
+  colorize: buildColorizeParts,
+  free: buildFreeParts,
+  inpaint: buildInpaintParts,
+};
 
 const running = new Map(); // jobId -> AbortController
 const startTimes = [];     // request start timestamps (RPM window)
@@ -86,6 +94,14 @@ export function createJobs(specs, existingBatchId) {
     sourceW: spec.sourceW,
     sourceH: spec.sourceH,
     guideFile: spec.guideFile || null,
+    sendFile: spec.sendFile || null,       // masked / padded image actually sent to the model
+    restoreFile: spec.restoreFile || null, // white = paste the original back after generation
+    pad: spec.pad || null,                 // content rect inside the padded image
+    censorFill: spec.censorFill || null,
+    inputFiles: spec.inputFiles || undefined,
+    refFiles: spec.refFiles || undefined,
+    prompt: spec.prompt || undefined,
+    extras: spec.extras || undefined,
     subjects: spec.subjects || [],
     options: spec.options || {},
     want: Math.max(1, Math.min(8, Number(spec.want) || 1)),
@@ -229,7 +245,7 @@ async function runJob(job) {
     const ctx = { loadImage: readImage, getCharacter };
     let parts;
     try {
-      parts = job.type === 'colorize' ? buildColorizeParts(job, ctx) : buildTransformParts(job, ctx);
+      parts = (BUILDERS[job.type] || buildTransformParts)(job, ctx);
     } catch (err) {
       throw new VertexError('config', err.message);
     }
@@ -246,7 +262,15 @@ async function runJob(job) {
       signal: ctrl.signal,
     });
     if (getJob(job.id) !== job) return; // deleted while the request was in flight
-    const file = saveImage('outputs', { mime: out.mime, buffer: out.buffer }, `${job.id}_${Date.now().toString(36)}`);
+    let image = { mime: out.mime, buffer: out.buffer };
+    if (job.pad || job.restoreFile) {
+      try {
+        image = await postProcess(out, job, readImage);
+      } catch (err) {
+        log(job, `마스킹 영역 복원 실패 — 원본 결과를 저장합니다: ${err.message}`, 'warn');
+      }
+    }
+    const file = saveImage('outputs', image, `${job.id}_${Date.now().toString(36)}`);
     job.results.push({ file, createdAt: Date.now(), model: model.label, aspectRatio: aspectRatio || 'auto', text: out.text?.slice(0, 500) || '' });
     job.error = null;
     job.errorKind = null;

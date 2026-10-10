@@ -1,10 +1,30 @@
 // Character library: saved reference images that can be picked for every job.
-import { h, clear, api, toast, fileUrl, prepareImage, pickFiles, makeDropzone, openModal, imageFilesFrom } from './util.js';
+import { h, append, clear, api, toast, fileUrl, prepareImage, pickFiles, makeDropzone, openModal, imageFilesFrom } from './util.js';
 import { store, refreshCharacters } from './state.js';
 import { charThumb } from './common.js';
 
 const GENDER_LABEL = { female: '여성', male: '남성', other: '기타' };
 const CHAR_MAX_PX = 1536;
+
+const analyzing = new Set();
+
+// AI appearance sheet: written once per character, added to every prompt that uses it
+async function analyze(id, { quiet = false } = {}) {
+  if (analyzing.has(id)) return null;
+  analyzing.add(id);
+  try {
+    const { character } = await api('POST', `/api/characters/${id}/describe`);
+    await refreshCharacters();
+    if (!quiet) toast(`"${character.name}" 외형 분석 완료`, 'ok');
+    return character;
+  } catch (e) {
+    toast(e.message, 'error', 8000);
+    return null;
+  } finally {
+    analyzing.delete(id);
+    render();
+  }
+}
 
 let root;
 let query = '';
@@ -42,16 +62,23 @@ function render() {
     h('option', { value: '' }, '모든 작품'),
     seriesList.map((s) => h('option', { value: s, selected: s === seriesFilter }, s)));
 
-  root.append(
+  append(root,
     h('div', { class: 'panel' },
       h('div', { class: 'row' },
         h('h3', { style: { margin: 0 } }, `캐릭터 라이브러리 (${chars.length})`),
         h('span', { class: 'spacer' }),
         searchInput, seriesSel,
+        chars.some((c) => !c.appearance) ? h('button', { class: 'btn', title: '외형 분석이 없는 캐릭터를 모두 분석합니다 (캐릭터당 텍스트 요청 1회)', onclick: async () => {
+          const todo = store.state.characters.filter((c) => !c.appearance);
+          if (!confirm(`외형 분석이 없는 캐릭터 ${todo.length}명을 분석할까요?`)) return;
+          for (const c of todo) await analyze(c.id, { quiet: true });
+          toast('외형 분석을 마쳤습니다.', 'ok');
+        } }, `외형 분석 안 된 ${chars.filter((c) => !c.appearance).length}명 분석`) : null,
         h('button', { class: 'btn primary', onclick: () => openEditor(null) }, '+ 새 캐릭터')),
       h('div', { class: 'help', style: { marginTop: '8px' } },
         '캐릭터마다 참조 이미지를 여러 장 저장할 수 있습니다 (전신 정면 이미지를 첫 번째로 두는 것을 권장). 변환 작업 시 첫 번째 이미지부터 설정한 개수만큼 사용됩니다. ',
-        '이미지를 여기로 끌어다 놓거나 Ctrl+V로 붙여 넣으면 새 캐릭터로 바로 추가됩니다.')),
+        '이미지를 여기로 끌어다 놓거나 Ctrl+V로 붙여 넣으면 새 캐릭터로 바로 추가됩니다. ',
+        h('b', {}, '외형 분석'), '은 AI가 헤어스타일·눈·의상을 글로 정리해 두는 기능으로, 변환할 때 실사 인물의 머리 모양을 따라가는 문제를 크게 줄여 줍니다.')),
   );
   const grid = h('div', { class: 'char-grid' });
   root.append(grid);
@@ -72,7 +99,9 @@ function render() {
         h('div', { class: 'thumb' }, charThumb(c)),
         h('div', { class: 'meta' },
           h('div', { class: 'nm' }, c.name),
-          h('div', { class: 'sub' }, [c.series, GENDER_LABEL[c.gender], `이미지 ${c.images.length}장`].filter(Boolean).join(' · ')))));
+          h('div', { class: 'sub' }, [c.series, GENDER_LABEL[c.gender], `이미지 ${c.images.length}장`].filter(Boolean).join(' · ')),
+          h('div', { class: 'sub', style: { color: analyzing.has(c.id) ? 'var(--accent)' : c.appearance ? 'var(--green)' : 'var(--orange)' } },
+            analyzing.has(c.id) ? '외형 분석 중…' : c.appearance ? '외형 분석 ✓' : '외형 분석 없음'))));
     }
   }
   renderGrid();
@@ -86,6 +115,7 @@ function openEditor(existing, onCreated) {
     series: existing?.series || '',
     gender: existing?.gender || 'female',
     description: existing?.description || '',
+    appearance: existing?.appearance || '',
   };
   const seriesList = [...new Set(store.state.characters.map((c) => c.series).filter(Boolean))];
   const imgGrid = h('div', { class: 'ref-grid' });
@@ -155,6 +185,7 @@ function openEditor(existing, onCreated) {
     });
   }
 
+  const appearanceInput = h('textarea', { rows: 6, placeholder: 'HAIR: waist-length straight silver hair, blunt bangs...\nEYES: ...\nOUTFIT: ...\n(AI로 분석 버튼을 누르면 자동으로 채워집니다. 직접 고쳐도 됩니다.)', oninput: (e) => { form.appearance = e.target.value; } }, form.appearance);
   const nameInput = h('input', { type: 'text', value: form.name, placeholder: '예: 아스나', oninput: (e) => { form.name = e.target.value; } });
   const content = h('div', {},
     h('h2', {}, existing ? '캐릭터 편집' : '새 캐릭터'),
@@ -167,7 +198,21 @@ function openEditor(existing, onCreated) {
         h('select', { onchange: (e) => { form.gender = e.target.value; } },
           Object.entries(GENDER_LABEL).map(([v, l]) => h('option', { value: v, selected: v === form.gender }, l)))),
       h('label', { class: 'field wide' }, h('span', {}, '특징 메모 (선택 — 프롬프트에 함께 전달됩니다, 영어/한국어 모두 가능)'),
-        h('textarea', { rows: 2, placeholder: '예: 키 160cm, 슬림한 체형, 오른쪽 눈 밑 점, 가방은 들지 않음', oninput: (e) => { form.description = e.target.value; } }, form.description))),
+        h('textarea', { rows: 2, placeholder: '예: 키 160cm, 슬림한 체형, 오른쪽 눈 밑 점, 가방은 들지 않음', oninput: (e) => { form.description = e.target.value; } }, form.description)),
+      h('div', { class: 'field wide' },
+        h('div', { class: 'row' },
+          h('span', { style: { fontWeight: 600 } }, '외형 분석 (헤어·눈·의상 — 변환 프롬프트에 그대로 들어갑니다)'),
+          h('span', { class: 'spacer' }),
+          character ? h('button', { class: 'btn sm', type: 'button', onclick: async (e) => {
+            const btn = e.currentTarget;
+            btn.disabled = true;
+            btn.textContent = '분석 중…';
+            const c = await analyze(character.id);
+            btn.disabled = false;
+            btn.textContent = 'AI로 다시 분석';
+            if (c) { form.appearance = c.appearance; appearanceInput.value = c.appearance; }
+          } }, form.appearance ? 'AI로 다시 분석' : 'AI로 분석') : h('span', { class: 'small muted' }, '저장하면 자동으로 분석합니다')),
+        appearanceInput)),
     h('h3', { style: { margin: '16px 0 8px', fontSize: '14px' } }, '참조 이미지'),
     imgGrid,
     h('div', { style: { marginTop: '8px' } }, dz),
@@ -194,7 +239,10 @@ function openEditor(existing, onCreated) {
             created = (await api('POST', '/api/characters', { ...form, images: pending })).character;
           }
           await refreshCharacters();
-          if (created) onCreated?.(created);
+          if (created) {
+            onCreated?.(created);
+            if (store.state.credentials.configured) analyze(created.id, { quiet: true }); // background
+          }
           toast('저장했습니다.', 'ok');
           m.close();
         } catch (e) {

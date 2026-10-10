@@ -250,3 +250,22 @@ export async function testConnection({ creds, location, model }) {
   const json = await postJson(url, token, { contents: [{ role: 'user', parts: [{ text: 'ping' }] }] }, { timeoutMs: 30_000, model });
   return { totalTokens: json.totalTokens };
 }
+
+// Text-only generation (used to write character appearance sheets).
+export async function generateText({ creds, location, model, parts, timeoutMs = 120_000, signal }) {
+  const token = await getAccessToken(creds);
+  const url = endpoint(location, creds.project_id, model, 'generateContent');
+  const body = {
+    contents: [{ role: 'user', parts }],
+    generationConfig: { temperature: 0.2, maxOutputTokens: 8192 },
+    safetySettings: SAFETY_CATEGORIES.map((category) => ({ category, threshold: 'OFF' })),
+  };
+  const json = await postJson(url, token, body, { timeoutMs, signal, model });
+  const cand = json.candidates?.[0];
+  const text = (cand?.content?.parts || []).filter((p) => typeof p.text === 'string' && !p.thought).map((p) => p.text).join('').trim();
+  if (!text) {
+    const reason = json.promptFeedback?.blockReason || cand?.finishReason || 'EMPTY';
+    throw new VertexError(reason === 'EMPTY' ? 'no_image' : 'blocked', `텍스트 응답 없음 (${reason})`);
+  }
+  return text;
+}

@@ -50,8 +50,10 @@ export async function api(method, url, body) {
 }
 
 export function toast(msg, type = 'info', ms = 4000) {
+  const box = document.getElementById('toasts');
   const el = h('div', { class: `toast ${type}` }, msg);
-  document.getElementById('toasts').append(el);
+  box.append(el);
+  while (box.children.length > 4) box.firstChild.remove(); // never pile up
   setTimeout(() => el.remove(), ms);
 }
 

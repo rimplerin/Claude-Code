@@ -2,11 +2,14 @@ import { h, append, clear, toast, imageFilesFrom } from './util.js';
 import { store, refreshState, refreshCharacters, refreshJobs, connectEvents } from './state.js';
 import { initTransform, transformPaste } from './transform.js';
 import { initColorize, colorizePaste } from './colorize.js';
+import { initInpaint, inpaintPaste } from './inpaint.js';
+import { initFree, freePaste } from './free.js';
 import { initCharacters, charactersPaste } from './characters.js';
 import { initJobs } from './jobs.js';
 import { initSettings } from './settings.js';
 
-const TABS = ['transform', 'colorize', 'characters', 'jobs', 'settings'];
+const TABS = ['transform', 'colorize', 'inpaint', 'free', 'characters', 'jobs', 'settings'];
+const PASTE = { transform: transformPaste, colorize: colorizePaste, inpaint: inpaintPaste, free: freePaste };
 
 function showTab(name) {
   if (!TABS.includes(name)) name = 'transform';
@@ -61,9 +64,10 @@ document.addEventListener('paste', (e) => {
   if (!files.length) return;
   e.preventDefault();
   if (charactersPaste(files)) return;
-  if (store.state.tab === 'transform') transformPaste(files);
-  else if (store.state.tab === 'colorize') colorizePaste(files);
-  else toast('이미지는 캐릭터 변환 / 만화 채색 / 캐릭터 라이브러리 탭에서 붙여넣을 수 있습니다.');
+  if (document.querySelector('.modal-back')) return; // e.g. mask editor open
+  const handler = PASTE[store.state.tab];
+  if (handler) handler(files);
+  else toast('이미지는 변환 / 채색 / 인페인트 / 자유 모드 / 캐릭터 라이브러리 탭에서 붙여넣을 수 있습니다.');
 });
 
 async function main() {
@@ -78,6 +82,8 @@ async function main() {
   }
   initTransform(document.getElementById('tab-transform'));
   initColorize(document.getElementById('tab-colorize'));
+  initInpaint(document.getElementById('tab-inpaint'));
+  initFree(document.getElementById('tab-free'));
   initCharacters(document.getElementById('tab-characters'));
   initJobs(document.getElementById('tab-jobs'));
   initSettings(document.getElementById('tab-settings'));

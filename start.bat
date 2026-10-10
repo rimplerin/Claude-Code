@@ -38,9 +38,10 @@ if errorlevel 1 goto old_node
 for /f "delims=" %%V in ('node -v') do echo  Node.js %%V
 
 rem ---- install packages on first run ----
-if exist "node_modules\express\package.json" goto run
+node scripts\check-deps.cjs >nul 2>&1
+if not errorlevel 1 goto run
 echo.
-echo  First run: installing packages (takes a minute)...
+echo  Installing packages (first run or after an update, takes a minute)...
 call npm install --omit=dev --no-audit --no-fund
 if errorlevel 1 goto npm_failed
 

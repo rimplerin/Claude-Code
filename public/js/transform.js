@@ -1,6 +1,6 @@
 // Tab 1: real photo -> 2D characters.
-import { h, append, clear, api, toast, prepareImage, pickFiles, makeDropzone, imageFilesFrom, naturalCompare } from './util.js';
-import { store, characterById } from './state.js';
+import { h, append, clear, api, toast, prepareImage, pickFiles, makeDropzone, imageFilesFrom, naturalCompare, openModal } from './util.js';
+import { store, characterById, refreshState } from './state.js';
 import { loadOpts, saveOpts, selectField, seg, commonOptionFields, charThumb, pickCharacter } from './common.js';
 
 export const SUBJECT_COLORS = ['#ff4d6d', '#3a86ff', '#2ec4b6', '#ffbe0b', '#8338ec', '#fb5607', '#06d6a0', '#ef476f'];
@@ -19,8 +19,11 @@ const OUTFITS = [
 
 const opts = loadOpts('transform', {
   model: null, imageSize: '2K', aspectRatio: 'auto', want: 1,
-  style: 'character', others: 'keep', noProps: true, maxRefs: 3, extra: '', clearAfter: true,
+  style: 'character', others: 'keep', noProps: true, maxRefs: 3, extra: '', clearAfter: true, defaultExtras: null,
 });
+// migrate the old single "no props" checkbox to the extras list
+if (!Array.isArray(opts.defaultExtras)) opts.defaultExtras = opts.noProps ? ['no_props'] : [];
+const extraList = () => store.state.settings?.extraOptions || [];
 const save = () => saveOpts('transform', opts);
 
 let root;
@@ -79,11 +82,72 @@ function renderOptions() {
         { value: 'remove', label: '지우기' },
       ], opts.others, set('others')),
       selectField('캐릭터당 참조 이미지', [1, 2, 3, 4, 5, 6].map((n) => ({ value: n, label: `최대 ${n}장` })), opts.maxRefs, (v) => { opts.maxRefs = Number(v); save(); }),
-      h('label', { class: 'field' }, h('span', {}, '기타'),
-        h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: opts.noProps, onchange: (e) => { opts.noProps = e.target.checked; save(); } }), '캐릭터 소지품(가방 등) 빼기')),
+      extrasPanel(),
       h('label', { class: 'field wide' }, h('span', {}, '추가 지시사항 (선택 — 모든 이미지에 적용)'),
         h('textarea', { rows: 2, placeholder: '예: 배경은 밤하늘로, 표정은 더 밝게 / Make the lighting warm sunset', oninput: (e) => { opts.extra = e.target.value; save(); } }, opts.extra))),
   );
+}
+
+// "기타 옵션": checkbox = default for newly added photos, buttons apply to every photo in the list
+function extrasPanel() {
+  const list = extraList();
+  const rows = list.map((o) => h('div', { class: 'extra-row' },
+    h('label', { class: 'check', title: o.prompt },
+      h('input', { type: 'checkbox', checked: opts.defaultExtras.includes(o.id), onchange: (e) => {
+        opts.defaultExtras = e.target.checked ? [...new Set([...opts.defaultExtras, o.id])] : opts.defaultExtras.filter((x) => x !== o.id);
+        save();
+      } }), o.label),
+    items.length ? h('span', { class: 'row', style: { gap: '4px' } },
+      h('button', { class: 'btn sm ghost', type: 'button', onclick: () => setExtraForAll(o.id, true) }, '모두 켬'),
+      h('button', { class: 'btn sm ghost', type: 'button', onclick: () => setExtraForAll(o.id, false) }, '모두 끔')) : null));
+  return h('div', { class: 'field wide' },
+    h('div', { class: 'row' },
+      h('span', { class: 'small muted', style: { fontWeight: 600 } }, '기타 옵션 — 체크 = 새로 추가하는 사진의 기본값. 사진마다 아래 카드에서 따로 켜고 끌 수 있습니다.'),
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'btn sm', type: 'button', onclick: openExtrasManager }, '옵션 추가 / 편집')),
+    h('div', { class: 'extras-grid' }, rows.length ? rows : h('span', { class: 'muted small' }, '옵션이 없습니다.')));
+}
+
+function setExtraForAll(id, on) {
+  for (const it of items) {
+    if (on) it.extras.add(id); else it.extras.delete(id);
+    it.refresh();
+  }
+  toast(`모든 사진에서 "${extraList().find((o) => o.id === id)?.label}" ${on ? '켬' : '끔'}`);
+}
+
+function openExtrasManager() {
+  const draft = extraList().map((o) => ({ ...o }));
+  const listEl2 = h('div');
+  const renderRows = () => {
+    clear(listEl2);
+    draft.forEach((o, i) => {
+      listEl2.append(h('div', { class: 'extra-edit' },
+        h('input', { type: 'text', value: o.label, placeholder: '표시 이름 (예: 모든 텍스트 제거)', oninput: (e) => { o.label = e.target.value; } }),
+        h('textarea', { rows: 2, placeholder: '프롬프트에 들어갈 지시문 (영어 권장, 예: Remove all text from the image.)', oninput: (e) => { o.prompt = e.target.value; } }, o.prompt),
+        h('button', { class: 'btn sm danger', type: 'button', onclick: () => { draft.splice(i, 1); renderRows(); } }, '삭제')));
+    });
+  };
+  renderRows();
+  const m = openModal(h('div', {},
+    h('h2', {}, '기타 옵션 편집'),
+    h('div', { class: 'help', style: { marginBottom: '10px' } }, '각 옵션은 체크된 사진의 프롬프트에 "EXTRA RULES"로 그대로 추가됩니다. 지시문은 영어로 쓰는 것이 가장 잘 먹힙니다.'),
+    listEl2,
+    h('button', { class: 'btn sm', type: 'button', style: { marginTop: '8px' }, onclick: () => { draft.push({ id: '', label: '', prompt: '' }); renderRows(); } }, '+ 옵션 추가'),
+    h('div', { class: 'foot' },
+      h('button', { class: 'btn', onclick: () => m.close() }, '취소'),
+      h('button', { class: 'btn primary', onclick: async () => {
+        try {
+          const clean = draft.filter((o) => o.label.trim() && o.prompt.trim());
+          await api('PUT', '/api/settings', { extraOptions: clean });
+          await refreshState();
+          items.forEach((it) => it.refresh());
+          m.close();
+          toast('기타 옵션을 저장했습니다.', 'ok');
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      } }, '저장'))), { wide: true });
 }
 
 function renderActions() {
@@ -126,6 +190,7 @@ async function addFiles(files) {
         ...img,
         active: 0,
         subjects: template.length ? template.map((s) => newSubject(s)) : [newSubject()],
+        extras: new Set(opts.defaultExtras),
       });
     } catch (err) {
       toast(`${f.name}: ${err.message}`, 'error');
@@ -135,6 +200,7 @@ async function addFiles(files) {
 }
 
 function renderList() {
+  renderOptions(); // the bulk on/off buttons depend on whether there are photos
   clear(listEl);
   items.forEach((item, idx) => listEl.append(buildCard(item, idx)));
   renderActions();
@@ -239,10 +305,11 @@ function buildCard(item, idx) {
         h('span', { class: 'name', title: item.name }, `#${idx + 1} ${item.name}`),
         h('span', { class: 'muted small' }, `${item.width}×${item.height}`),
         h('span', { class: 'spacer' }),
-        items.length > 1 ? h('button', { class: 'btn sm', title: '이 사진의 인물 설정(캐릭터/옷/위치/설명)을 다른 모든 사진에 복사합니다. 박스는 복사되지 않습니다.', onclick: () => {
+        items.length > 1 ? h('button', { class: 'btn sm', title: '이 사진의 인물 설정(캐릭터/옷/위치/설명)과 기타 옵션을 다른 모든 사진에 복사합니다. 박스는 복사되지 않습니다.', onclick: () => {
           for (const other of items) {
             if (other === item) continue;
             other.subjects = item.subjects.map((s) => newSubject(s));
+            other.extras = new Set(item.extras);
             other.active = 0;
             other.refresh();
           }
@@ -261,6 +328,15 @@ function buildCard(item, idx) {
         item.subjects.length > 1 && item.subjects.some((s) => !s.box && s.position === 'auto' && !s.desc)
           ? h('span', { class: 'small', style: { color: 'var(--orange)' } }, '여러 명일 때는 각 인물의 박스·위치·설명 중 하나 이상을 지정하세요.')
           : null),
+      extraList().length ? h('div', { class: 'chips extras-chips' },
+        h('span', { class: 'small muted' }, '기타:'),
+        extraList().map((o) => {
+          const on = item.extras.has(o.id);
+          return h('button', { type: 'button', class: `toggle-chip ${on ? 'on' : ''}`, title: o.prompt, onclick: () => {
+            if (on) item.extras.delete(o.id); else item.extras.add(o.id);
+            refresh();
+          } }, `${on ? '✓ ' : ''}${o.label}`);
+        })) : null,
     );
     renderBoxes();
   }
@@ -336,9 +412,10 @@ async function submit() {
         height: it.height,
         title: it.name,
         subjects: it.subjects.map(({ characterId, outfit, position, desc, box }) => ({ characterId, outfit, position, desc, box })),
+        extras: extraList().filter((o) => it.extras.has(o.id)).map(({ label, prompt }) => ({ label, prompt })),
       });
     }
-    const options = { model: opts.model, imageSize: opts.imageSize, aspectRatio: opts.aspectRatio, style: opts.style, others: opts.others, noProps: opts.noProps, maxRefs: opts.maxRefs, extra: opts.extra };
+    const options = { model: opts.model, imageSize: opts.imageSize, aspectRatio: opts.aspectRatio, style: opts.style, others: opts.others, maxRefs: opts.maxRefs, extra: opts.extra };
     // send in chunks so a large batch doesn't hit request size limits
     let batchId;
     let chunk = [];

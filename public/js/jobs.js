@@ -3,7 +3,8 @@ import { h, append, clear, api, toast, fileUrl, fmtTime, download } from './util
 import { store } from './state.js';
 
 const STATUS_LABEL = { queued: '대기', running: '생성 중', retrying: '재시도 대기', done: '완료', failed: '실패', canceled: '취소됨' };
-const TYPE_LABEL = { transform: '캐릭터 변환', colorize: '만화 채색' };
+const TYPE_LABEL = { transform: '캐릭터 변환', colorize: '만화 채색', inpaint: '인페인트', free: '자유 모드' };
+const SUFFIX = { transform: '2d', colorize: 'color', inpaint: 'inpaint', free: 'gen' };
 const KIND_LABEL = {
   network: '네트워크', timeout: '시간 초과', rate_limit: '요청 한도', server: '서버 오류', auth: '권한/인증',
   not_found: '모델 없음', bad_request: '요청 오류', blocked: '차단', no_image: '이미지 없음', config: '설정', unknown: '오류',
@@ -37,7 +38,7 @@ function stem(name) {
 
 function resultFilename(job, idx) {
   const ext = job.results[idx].file.split('.').pop();
-  return `${stem(job.title)}_${job.type === 'colorize' ? 'color' : '2d'}${job.results.length > 1 ? `_v${idx + 1}` : ''}.${ext}`;
+  return `${stem(job.title).slice(0, 80)}_${SUFFIX[job.type] || 'out'}${job.results.length > 1 ? `_v${idx + 1}` : ''}.${ext}`;
 }
 
 function counts(jobs) {
@@ -216,9 +217,19 @@ function buildJob(j) {
     resultCell = h('div', { class: 'cell' }, h('div', { class: 'status-ph' }, ...ph));
   }
 
-  const mapping = j.type === 'transform'
-    ? h('div', { class: 'mapping' }, j.subjects.map((s, i) => `${CIRCLED[i] || i + 1} ${s.characterName} (${s.outfit === 'source' ? '실사 옷' : '캐릭터 옷'})`).join('   '))
-    : null;
+  let mapping = null;
+  if (j.type === 'transform') {
+    const extras = (j.extras || []).map((e) => e.label).filter(Boolean);
+    mapping = h('div', { class: 'mapping' },
+      j.subjects.map((s, i) => `${CIRCLED[i] || i + 1} ${s.characterName} (${s.outfit === 'source' ? '실사 옷' : '캐릭터 옷'})`).join('   '),
+      extras.length ? h('div', {}, `기타: ${extras.join(', ')}`) : null);
+  } else if (j.type === 'free' || j.type === 'inpaint') {
+    const text = [j.options?.prompt, j.prompt].filter((x) => x && x.trim()).join(' / ');
+    mapping = h('div', { class: 'mapping', title: text, style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+      `${j.inputFiles?.length > 1 ? `이미지 ${j.inputFiles.length}장 · ` : ''}${text}`);
+  }
+  if ((j.censorFill || j.restoreFile) && mapping == null) mapping = h('div', { class: 'mapping' });
+  if (j.censorFill) mapping.append(h('div', {}, '마스킹 영역은 원본으로 복원됨'));
 
   const showErr = j.error && (j.status === 'failed' || j.status === 'retrying');
   return h('div', { class: `job ${j.status}` },
@@ -227,8 +238,10 @@ function buildJob(j) {
       h('span', { class: 'small', style: { fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }, title: j.title }, j.title || j.id),
       j.attempts > 1 ? h('span', { class: 'small muted', title: '총 요청 횟수' }, `시도 ${j.attempts}`) : null),
     h('div', { class: 'imgs' },
-      h('div', { class: 'cell', onclick: () => openViewerFor(j.batchId, { jobId: j.id, idx: Math.max(0, last), mode: 'source' }) },
-        h('img', { src: fileUrl(j.sourceFile), loading: 'lazy' }), h('span', { class: 'cap' }, '원본')),
+      j.sourceFile
+        ? h('div', { class: 'cell', onclick: () => openViewerFor(j.batchId, { jobId: j.id, idx: Math.max(0, last), mode: 'source' }) },
+          h('img', { src: fileUrl(j.sourceFile), loading: 'lazy' }), h('span', { class: 'cap' }, j.inputFiles?.length > 1 ? `입력 1/${j.inputFiles.length}` : '원본'))
+        : h('div', { class: 'cell' }, h('div', { class: 'status-ph' }, '텍스트만 (입력 이미지 없음)')),
       resultCell),
     mapping,
     showErr ? h('div', { class: 'err' }, h('b', {}, `[${KIND_LABEL[j.errorKind] || '오류'}] `), j.error) : null,
@@ -299,7 +312,9 @@ function openViewerFor(batchId, start) {
     clear(stage);
     const src = fileUrl(j.sourceFile);
     const out = fileUrl(r.file);
-    if (mode === 'side') {
+    if (!src) {
+      stage.append(h('img', { src: out }));
+    } else if (mode === 'side') {
       stage.append(h('div', { class: 'side' }, h('div', {}, h('img', { src })), h('div', {}, h('img', { src: out }))));
     } else if (mode === 'slider') {
       const over = h('div', { class: 'over' }, h('img', { src }));

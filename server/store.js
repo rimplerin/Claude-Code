@@ -22,6 +22,15 @@ export const DEFAULT_SETTINGS = {
     { key: 'nbpro', label: 'Nano Banana Pro', id: 'gemini-3-pro-image' },
   ],
   defaultModel: 'nb2',
+  textModel: 'gemini-3.5-flash', // used for the character appearance analysis
+  // per-photo toggles on the character transform tab (editable in the UI)
+  extraOptions: [
+    { id: 'no_props', label: '캐릭터 소지품(가방 등) 빼기', prompt: 'Do not add bags, weapons or handheld props from the character references unless the person in the source photo is actually holding something there.' },
+    { id: 'no_text', label: '모든 텍스트 제거', prompt: 'Remove all text from the entire image: letters, numbers, signs, captions, printed words on clothing and background. No text anywhere.' },
+    { id: 'no_logo', label: '로고 제거', prompt: 'Remove all logos, brand marks, emblems and printed graphics from clothing, objects and the background.' },
+    { id: 'no_hair_ornament', label: '머리 장식 제거', prompt: "Do not draw any hair ornaments or headwear (ribbons, clips, hairpins, headbands, hats, flowers) even if the character reference has them. Keep the character's hairstyle itself unchanged." },
+    { id: 'female_barefoot', label: '여성 캐릭터 맨발', prompt: 'Every female character is barefoot: bare feet with visible toes, no shoes, no socks, no stockings on the feet.' },
+  ],
   concurrency: 2,          // simultaneous requests
   rpm: 10,                 // max requests started per minute
   maxRetries: 6,           // network / 429 / 5xx retries per job
@@ -85,6 +94,19 @@ export function updateSettings(patch) {
   next.requestTimeoutSec = clampInt(patch.requestTimeoutSec ?? next.requestTimeoutSec, 30, 1800, DEFAULT_SETTINGS.requestTimeoutSec);
   next.uploadMaxPx = clampInt(patch.uploadMaxPx ?? next.uploadMaxPx, 512, 8192, DEFAULT_SETTINGS.uploadMaxPx);
   next.colorizeMaxPx = clampInt(patch.colorizeMaxPx ?? next.colorizeMaxPx, 512, 8192, DEFAULT_SETTINGS.colorizeMaxPx);
+  if (typeof patch.textModel === 'string' && patch.textModel.trim()) next.textModel = patch.textModel.trim();
+  if (Array.isArray(patch.extraOptions)) {
+    const seen = new Set();
+    next.extraOptions = patch.extraOptions
+      .filter((o) => o && String(o.label || '').trim() && String(o.prompt || '').trim())
+      .map((o) => {
+        let id = String(o.id || '').trim() || newId('x');
+        while (seen.has(id)) id = newId('x');
+        seen.add(id);
+        return { id, label: String(o.label).trim().slice(0, 60), prompt: String(o.prompt).trim().slice(0, 1000) };
+      })
+      .slice(0, 40);
+  }
   if (patch.safetyThreshold === 'OFF' || patch.safetyThreshold === 'BLOCK_NONE') next.safetyThreshold = patch.safetyThreshold;
   settings = next;
   writeJsonAtomic(SETTINGS_FILE, settings);
@@ -176,6 +198,7 @@ function sanitizeCharacter(input, base = {}) {
     series: String(input.series ?? base.series ?? '').trim().slice(0, 100),
     gender: GENDERS.includes(input.gender) ? input.gender : base.gender || 'female',
     description: String(input.description ?? base.description ?? '').trim().slice(0, 2000),
+    appearance: String(input.appearance ?? base.appearance ?? '').trim().slice(0, 4000),
   };
 }
 
@@ -239,19 +262,19 @@ export function addJobs(list) {
   scheduleJobsSave();
 }
 
+// every uploaded input a job references (outputs are tracked in job.results)
+function jobInputs(j) {
+  return [j.sourceFile, j.guideFile, j.sendFile, j.restoreFile, ...(j.inputFiles || []), ...(j.refFiles || [])].filter(Boolean);
+}
+
 export function removeJobs(ids) {
   const set = new Set(ids);
   const removed = jobs.filter((j) => set.has(j.id));
   jobs = jobs.filter((j) => !set.has(j.id));
-  const stillUsed = new Set();
-  for (const j of jobs) {
-    if (j.sourceFile) stillUsed.add(j.sourceFile);
-    if (j.guideFile) stillUsed.add(j.guideFile);
-  }
+  const stillUsed = new Set(jobs.flatMap(jobInputs));
   for (const j of removed) {
     for (const r of j.results || []) removeFile(r.file);
-    if (j.sourceFile && !stillUsed.has(j.sourceFile)) removeFile(j.sourceFile);
-    if (j.guideFile && !stillUsed.has(j.guideFile)) removeFile(j.guideFile);
+    for (const f of jobInputs(j)) if (!stillUsed.has(f)) removeFile(f);
   }
   scheduleJobsSave();
   return removed;

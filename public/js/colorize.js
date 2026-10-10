@@ -2,10 +2,12 @@
 import { h, append, clear, api, toast, prepareImage, pickFiles, makeDropzone, imageFilesFrom, naturalCompare, fileUrl } from './util.js';
 import { store, characterById } from './state.js';
 import { loadOpts, saveOpts, selectField, commonOptionFields, pickCharacter } from './common.js';
+import { openMaskEditor, drawPreview, buildMaskedSubmission, loadImg, hasPaint } from './maskeditor.js';
+import { CENSOR_FILL_OPTIONS } from './inpaint.js';
 
 const opts = loadOpts('colorize', {
   model: null, imageSize: '2K', aspectRatio: 'auto', want: 1,
-  style: 'official', keepText: true, refs: [], extra: '', clearAfter: true,
+  style: 'official', keepText: true, refs: [], extra: '', clearAfter: true, censorFill: 'white',
 });
 const save = () => saveOpts('colorize', opts);
 
@@ -21,7 +23,8 @@ export function initColorize(el) {
   root = el;
   optsEl = h('div', { class: 'panel' });
   const dz = h('div', { class: 'dropzone', onclick: async () => addFiles(await pickFiles()) },
-    h('div', {}, h('b', {}, '흑백 만화 페이지 추가'), ' — 클릭, 드래그 앤 드롭 또는 Ctrl+V (여러 장 가능, 파일명 순 정렬)'));
+    h('div', {}, h('b', {}, '흑백 만화 페이지 추가'), ' — 클릭, 드래그 앤 드롭 또는 Ctrl+V (여러 장 가능, 파일명 순 정렬)'),
+    h('div', { class: 'small', style: { marginTop: '4px' } }, '검열에 걸릴 만한 부분은 페이지의 "마스킹" 버튼으로 칠해 두세요. 가린 채로 채색을 요청하고, 결과에서는 그 부분만 원본으로 되돌립니다.'));
   makeDropzone(dz, addFiles);
   gridEl = h('div', { class: 'page-grid' });
   actionsEl = h('div', { class: 'sticky-actions' });
@@ -66,6 +69,7 @@ function renderOptions() {
     h('h3', {}, '채색 옵션'),
     h('div', { class: 'opt-grid' },
       ...commonOptionFields(opts, save),
+      selectField('마스킹 영역 채우기', CENSOR_FILL_OPTIONS, opts.censorFill, set('censorFill'), { title: '페이지마다 "마스킹"으로 칠한 곳을 어떻게 가려서 보낼지. 결과에서는 원본(흑백)으로 복원됩니다.' }),
       selectField('채색 스타일', [
         { value: 'official', label: '공식 디지털 컬러판' },
         { value: 'anime', label: '애니메이션 셀 채색' },
@@ -96,7 +100,7 @@ async function addFiles(files) {
   const maxPx = store.state.settings?.colorizeMaxPx || 2560;
   for (const f of files) {
     try {
-      pages.push({ id: ++seq, ...(await prepareImage(f, maxPx, { quality: 0.95 })) });
+      pages.push({ id: ++seq, masks: {}, ...(await prepareImage(f, maxPx, { quality: 0.95 })) });
     } catch (err) {
       toast(`${f.name}: ${err.message}`, 'error');
     }
@@ -107,9 +111,23 @@ async function addFiles(files) {
 function renderGrid() {
   clear(gridEl);
   pages.forEach((p, i) => {
+    const thumb = h('canvas', { class: 'page-thumb', title: '클릭해서 마스킹 영역 그리기' });
+    loadImg(p.dataUrl).then((img) => drawPreview(thumb, img, p.masks, 360));
+    const masked = hasPaint(p.masks.censor);
+    const editMask = () => openMaskEditor({
+      src: p.dataUrl,
+      layers: ['censor'],
+      masks: p.masks,
+      title: `마스킹 — ${p.name}`,
+      onSave: (m) => { p.masks = m; renderGrid(); },
+    });
+    thumb.addEventListener('click', editMask);
     gridEl.append(h('div', { class: 'card page-item' },
-      h('img', { src: p.dataUrl, alt: '' }),
+      thumb,
       h('div', { class: 'nm', title: p.name }, `${i + 1}. ${p.name}`),
+      h('div', { class: 'row', style: { marginTop: '4px' } },
+        h('button', { class: `btn sm ${masked ? 'primary' : ''}`, onclick: editMask }, masked ? '🖌 마스킹 ✓' : '🖌 마스킹'),
+        masked ? h('button', { class: 'btn sm ghost', onclick: () => { p.masks = {}; renderGrid(); } }, '해제') : null),
       h('button', { class: 'btn sm x', onclick: () => { pages = pages.filter((x) => x !== p); renderGrid(); } }, '✕')));
   });
   renderActions();
@@ -136,9 +154,12 @@ async function submit() {
       size = 0;
     };
     for (const p of pages) {
-      if (size + p.dataUrl.length > 40e6) await flush();
-      chunk.push({ image: p.dataUrl, width: p.width, height: p.height, title: p.name });
-      size += p.dataUrl.length;
+      const sub = await buildMaskedSubmission({ src: p.dataUrl, masks: { censor: p.masks.censor }, censorFill: opts.censorFill });
+      const item = { image: p.dataUrl, width: p.width, height: p.height, title: p.name, ...(sub || {}) };
+      const len = [item.image, item.send, item.restore].reduce((a, d) => a + (d?.length || 0), 0);
+      if (size + len > 40e6) await flush();
+      chunk.push(item);
+      size += len;
     }
     await flush();
     toast(`${pages.length}장 채색 작업을 큐에 추가했습니다.`, 'ok');
