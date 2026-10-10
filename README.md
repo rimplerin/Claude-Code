@@ -17,6 +17,8 @@ Google Vertex AI의 **Nano Banana 2 / Nano Banana Pro**(Gemini 이미지 모델)
 - **macOS / Linux**: `./start.sh`
 - 직접 실행: `npm install` 후 `npm start` → 브라우저에서 http://localhost:3000
 
+`start.bat`은 PC의 PATH 환경 변수가 망가져 있어도(예: `'chcp'은(는) 내부 또는 외부 명령...이 아닙니다` 오류) Windows 시스템 폴더와 기본 Node.js 설치 폴더를 직접 찾아서 실행합니다. 그래도 Node.js를 못 찾는다고 나오면 Node.js 설치 후 PC를 재시작하세요.
+
 처음 실행하면 설정 탭이 열립니다. 서비스 계정 JSON 키를 등록하고 **연결 테스트**를 누르세요.
 
 ## Google Cloud 서비스 계정 키 만들기

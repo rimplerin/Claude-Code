@@ -298,11 +298,21 @@ app.use((err, req, res, next) => {
   return next();
 });
 
-app.listen(PORT, HOST, () => {
+const server = app.listen(PORT, HOST, () => {
   const url = `http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`;
   console.log(`\n  Banana i2i 실행 중 → ${url}\n  (종료: Ctrl+C)\n`);
   if (process.env.OPEN_BROWSER) {
     const cmd = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : [process.platform === 'darwin' ? 'open' : 'xdg-open', [url]];
     try { spawn(cmd[0], cmd[1], { stdio: 'ignore', detached: true }).on('error', () => {}).unref(); } catch { /* no browser */ }
   }
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n  포트 ${PORT}이(가) 이미 사용 중입니다. Banana i2i가 이미 실행 중이면 브라우저에서 http://localhost:${PORT} 을 여세요.`);
+    console.error('  다른 포트로 실행하려면: set PORT=3001 후 다시 실행\n');
+  } else {
+    console.error(err);
+  }
+  process.exit(1);
 });
