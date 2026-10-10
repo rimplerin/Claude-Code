@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Banana i2i</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍌</text></svg>" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🍌 Banana i2i</div>
+    <nav class="tabs" id="tabs">
+      <button data-tab="transform" class="active">캐릭터 변환</button>
+      <button data-tab="colorize">만화 채색</button>
+      <button data-tab="characters">캐릭터 라이브러리</button>
+      <button data-tab="jobs">작업 현황 <span class="badge" id="jobs-badge"></span></button>
+      <button data-tab="settings">설정</button>
+    </nav>
+    <div class="queue-pill" id="queue-pill" title="작업 큐 상태"></div>
+  </header>
+
+  <div id="cred-banner" class="banner hidden">
+    서비스 계정 JSON이 등록되지 않았습니다. <a href="#" data-goto="settings">설정 탭</a>에서 Google Cloud 서비스 계정 키를 등록하세요.
+  </div>
+
+  <main>
+    <section id="tab-transform" class="tab-panel active"></section>
+    <section id="tab-colorize" class="tab-panel"></section>
+    <section id="tab-characters" class="tab-panel"></section>
+    <section id="tab-jobs" class="tab-panel"></section>
+    <section id="tab-settings" class="tab-panel"></section>
+  </main>
+
+  <div id="modal-root"></div>
+  <div id="toasts"></div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
